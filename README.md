@@ -1,364 +1,217 @@
 # sunny-claws
 
-sunny-claws is a full-stack chatbot project with a custom assistant persona, a Node/Express backend, MongoDB persistence, and a Next.js frontend. In its current state, the project already supports end-to-end chat requests, stores conversations by session, keeps a simple long-term memory per session, and can optionally call small utility tools before generating a reply.
+sunny-claws is a full-stack AI assistant project with a Next.js frontend and a Node/Express backend. It supports persistent chat sessions, categorized long-term memory, tool-augmented responses, and a planner-driven agent flow.
 
-This README describes what the project is right now, how the pieces flow together, and what each file is responsible for. It intentionally avoids secret configuration details and does not document provider-specific private setup values.
+This document reflects the current implementation state of the repository.
 
-## Current Project Status
+## What It Can Do Now
 
-The project currently includes:
+- Chat end-to-end from frontend to backend.
+- Store chat sessions and messages in MongoDB.
+- Extract long-term memory from user messages as structured JSON.
+- Store memory with categories (`identity`, `preference`, `project`, `skill`, `general`).
+- Replace older identity memories (for example, name updates) with the newest one.
+- Build a lightweight plan before tool selection/execution.
+- Use multiple tools:
+  - `calculator`
+  - `weather`
+  - `webSearch`
+  - `email`
+- Return resilient fallbacks when AI credentials or external services are unavailable.
 
-- A backend API that accepts chat messages and returns assistant replies.
-- MongoDB models for chat messages, chat sessions, and long-term memory.
-- A memory pipeline that extracts durable facts from user messages and stores them by session.
-- A tool-selection step that can decide whether a request should use a utility tool.
-- Two active tools: calculator and weather.
-- A Next.js frontend with a landing page, a public chat page, and a shared navigation bar.
+## Architecture
 
-The project also has some work-in-progress areas:
+- Backend: `Backend/`
+- Frontend: `Frontend/claws/`
 
-- A `private` frontend area exists as an empty folder and is not wired up yet.
-- A profile link and logout action are present in the UI, but the related app flow is not implemented.
-- A web search tool file exists, but it is not registered in the tool registry, so it is not used.
-- There are two backend message model files that define the same message schema.
+High-level behavior:
 
-## High-Level Architecture
-
-The app is split into two main parts:
-
-- `Backend/`: Express server, database connection, routing, controller logic, memory handling, tool execution, and assistant reply generation.
-- `Frontend/claws/`: Next.js app that renders the UI and sends chat messages to the backend.
-
-At a high level, the frontend sends a message to the backend, the backend saves context, optionally runs a tool, builds a prompt using recent chat plus saved memory, generates a reply, stores the reply, and returns it to the UI.
+1. User sends a chat message from frontend.
+2. Backend loads recent chat + saved memories.
+3. Backend agent creates a plan.
+4. Agent chooses and optionally executes a tool.
+5. Assistant generates final reply with memory context and tool results.
+6. Backend stores assistant reply and extracted memory.
+7. Frontend renders response.
 
 ## Workflow Diagram
 
 ```mermaid
 flowchart TD
-	A[User opens frontend] --> B[Landing page at /]
-	B --> C[Public chat page at /public]
-	C --> D[User types a message]
-	D --> E[Frontend POST to /web/chatbot/chat-away]
-
-	E --> F[Controller validates message and sessionId]
-	F --> G[Extract long-term memory candidate]
-	G --> H[Save memory if useful]
-	H --> I[Upsert chat session]
-	I --> J[Save user message]
-	J --> K[Load recent messages]
-	K --> L[Load long-term memories]
-	L --> M[Ask tool chooser if a tool is needed]
-
-	M -->|No tool| N[Build assistant request]
-	M -->|Tool selected| O[Run selected tool]
-	O --> N
-
-	N --> P[Generate assistant reply]
-	P --> Q[Save assistant message]
-	Q --> R[Return JSON response to frontend]
-	R --> S[Frontend renders reply in chat]
+    A[User message in frontend] --> B[POST /web/chatbot/chat-away]
+    B --> C[Controller validates input]
+    C --> D[Upsert session and save user message]
+    D --> E[Load recent messages]
+    E --> F[Load saved memories]
+    F --> G[Build full memory text]
+    G --> H[runSunnyClawAgent]
+    H --> I[Planner creates plan]
+    I --> J[Tool chooser decides]
+    J -->|No tool| K[Generate final reply]
+    J -->|Tool selected| L[Run selected tool]
+    L --> K
+    K --> M[Return reply + agent steps]
+    M --> N[Extract structured memory]
+    N --> O[Save categorized memory]
+    O --> P[Save assistant message]
+    P --> Q[Respond to frontend]
 ```
 
-## Request Flow From Top To Bottom
+## Backend Request Flow
 
-### 1. Frontend entry
+### Main endpoint
 
-The user lands on `/` and is taken into the app by navigating to `/public`. The public page owns the chat UI, local message list, active session ID, and the fetch call to the backend.
+- `POST /web/chatbot/chat-away`
 
-### 2. Backend route
+Execution flow in `chatbotController`:
 
-The frontend sends a POST request to `/web/chatbot/chat-away`. That route is mounted by the Express server and forwarded to the chatbot controller.
+1. Validate `message` and resolve `sessionId`.
+2. Ensure session exists (`chatSessionModel`).
+3. Save user message (`chatbotModel`).
+4. Load recent chat history.
+5. Load saved memories via `getMemories(sessionId)`.
+6. Build memory context text.
+7. Run `runSunnyClawAgent(cleanMessage, fullMemoryText)`.
+8. Use `agentResult.reply` as assistant reply.
+9. Extract structured memory (`extractMemory`).
+10. Save memory object (`saveMemory`).
+11. Save assistant message.
+12. Return JSON reply.
 
-### 3. Validation and session setup
+Secondary endpoint:
 
-The controller checks that the request contains a non-empty message. It also creates or reuses a session ID so all stored messages and memories can be grouped together.
+- `GET /web/chatbot/sessions` returns sessions sorted by `updatedAt`.
 
-### 4. Memory extraction
+## Key Capabilities Added
 
-Before generating a response, the backend tries to extract a durable fact from the incoming user message. If the message contains something worth remembering, that memory is stored in MongoDB under the current session.
+### 1) Planner-driven agent orchestration
 
-### 5. Chat history storage
+- File: `Backend/services/agentService.js`
+- File: `Backend/services/plannerService.js`
 
-The backend stores the incoming user message as a chat record. It also creates the chat session document if this is the first message for that session.
+What happens:
 
-### 6. Context building
+- Agent first asks planner for a JSON plan.
+- Planner failures gracefully fall back to a default simple plan.
+- Agent records step results in `agentSteps`.
+- Agent handles planning/tool/final-reply failures with try/catch fallbacks.
 
-The backend fetches the most recent chat messages for short-term context and fetches stored memory entries for long-term context. These two sources are combined into one memory block.
+### 2) Structured, categorized memory
 
-### 7. Tool decision
+- File: `Backend/services/memoryService.js`
+- File: `Backend/models/memoryModel.js`
 
-The backend asks its tool-selection layer whether the user message needs an external helper. Right now that means simple math or weather lookups.
+What happens:
 
-### 8. Tool execution
+- Memory extraction returns JSON (`shouldSave`, `category`, `memory`).
+- Name formats like `My name is ...`, `... is my name`, and `I am ...` are recognized.
+- Memory schema now includes `category` (default `general`).
+- For `identity` category, older identity memories for the session are replaced.
+- Duplicate memory entries are avoided.
 
-If a tool is selected, the tool service looks it up in the registry and runs it. The tool output is then included with the final assistant request.
+### 3) Expanded tool stack
 
-### 9. Assistant reply generation
+- File: `Backend/tools/toolRegistry.js`
 
-The backend generates the assistant response using the configured assistant persona, the current user message, the recent chat context, the stored memory context, and any tool output.
+Active tools:
 
-### 10. Persistence and response
+- `calculator`: math expressions.
+- `weather`: weather lookup with known-city fallback coordinates + geocoding fallback.
+- `webSearch`: DuckDuckGo instant answer lookup with timeout handling.
+- `email`: SMTP email send using configured Gmail credentials.
 
-The assistant reply is saved to the database and returned to the frontend as JSON. The frontend then appends that reply to the visible message thread.
+### 4) Tool chooser improvements
 
-## Project Structure
+- File: `Backend/services/openaiService.js`
 
-```text
-sunny-claws/
-├── Backend/
-│   ├── config/
-│   ├── controllers/
-│   ├── models/
-│   ├── routes/
-│   ├── services/
-│   ├── tools/
-│   ├── package.json
-│   └── server.js
-├── Frontend/
-│   └── claws/
-│       ├── src/app/
-│       ├── src/components/
-│       └── package.json
-└── README.md
-```
+What changed:
 
-## File-By-File Explanation
+- Chooser prompt includes explicit web lookup rule.
+- Chooser supports `webSearch` for latest/current facts and lookup-style queries.
 
-### Root
+## Tool Details
 
-#### `README.md`
+### Weather tool
 
-- What it is: the project-level documentation file.
-- How it is used: explains the app structure, request flow, and current implementation state.
-- Why it exists: to make the codebase understandable without tracing every file manually.
+- File: `Backend/tools/weatherTool.js`
+- Fast path for known cities (Vancouver, Surrey, San Jose, Jalandhar).
+- Supports typo handling like `vancovuer`.
+- Uses abortable fetch timeouts for reliability.
 
-## Backend
+### Web search tool
 
-### `Backend/server.js`
+- File: `Backend/tools/webSearchTool.js`
+- Uses DuckDuckGo Instant Answer API.
+- Returns best available result from abstract, direct answer, or related topics.
+- Includes timeout + error fallback behavior.
 
-- What it does: starts the Express app, enables JSON parsing and CORS, defines a basic hello route, mounts the chatbot router, connects to MongoDB, and starts listening on the backend port.
-- Where it sits in the flow: this is the backend entry point and the first server file that runs.
-- Why it exists: it assembles the application and controls startup.
+### Email tool
 
-### `Backend/package.json`
+- File: `Backend/tools/emailTool.js`
+- Validates `to`, `subject`, `body` input object.
+- Reads Gmail email and app password from environment.
+- Sends via secure Gmail SMTP host configuration.
+- Includes temporary debug logs for delivery troubleshooting.
 
-- What it does: defines backend dependencies such as Express, MongoDB integration, environment loading, and the OpenAI SDK.
-- Where it sits in the flow: it supports installation and runtime for the backend app.
-- Why it exists: Node projects need dependency and script metadata here.
-
-### `Backend/config/agentSoul.js`
-
-- What it does: stores the assistant persona text used when generating replies.
-- How it works: exports a reusable string that is inserted as the system prompt for the assistant.
-- Why it exists: keeping the persona separate makes it easier to tune behavior without mixing prompt text into controller logic.
-
-### `Backend/config/mongoDB.js`
-
-- What it does: creates the MongoDB connection function.
-- How it works: reads local runtime configuration, validates that the database connection string exists, and opens a Mongoose connection.
-- Why it exists: database bootstrapping should be isolated from route and controller logic.
-
-### `Backend/controllers/chatbotController.js`
-
-- What it does: handles chat requests and session-list requests.
-- How it works: validates input, extracts memory, saves memory, upserts sessions, stores chat messages, loads recent context, chooses tools, generates replies, stores assistant output, and returns JSON.
-- Why it exists: controllers hold request-specific orchestration so the route layer stays thin.
-
-### `Backend/routes/chatbotRouter.js`
-
-- What it does: defines the chatbot-related HTTP endpoints.
-- How it works: maps `POST /chat-away` to the reply flow and `GET /sessions` to session retrieval.
-- Why it exists: routes should declare endpoint structure without containing the business logic themselves.
-
-### `Backend/models/chatSessionModel.js`
-
-- What it does: defines the schema for chat sessions.
-- How it works: stores a unique session ID, a title, and automatic timestamps.
-- Why it exists: sessions let the backend group messages and memories into separate conversations.
-
-### `Backend/models/memoryModel.js`
-
-- What it does: defines the schema for long-term remembered facts.
-- How it works: stores a memory string tied to a session ID, plus timestamps.
-- Why it exists: this gives the assistant a persistent memory layer beyond the latest messages.
-
-### `Backend/models/chatbotModel.js`
-
-- What it does: defines the schema for individual chat messages.
-- How it works: stores session ID, sender role, message text, and timestamps.
-- Why it exists: this is the model currently imported by the controller for chat persistence.
-
-### `Backend/models/chatbotMessageModel.js`
-
-- What it does: defines the same chat message schema as `chatbotModel.js`.
-- How it works: creates the same `ChatbotMessage` model structure.
-- Why it exists: right now it appears to be a duplicate file rather than a separate model.
-
-### `Backend/services/openaiService.js`
-
-- What it does: handles assistant reply generation and tool-selection decisions.
-- How it works: lazily creates a client when AI credentials are available, falls back gracefully when they are not, asks one AI step whether a tool is needed, and asks another AI step to generate the final reply.
-- Why it exists: AI-specific logic is easier to maintain and swap when it is isolated from controller code.
-
-### `Backend/services/memoryService.js`
-
-- What it does: extracts memories, saves memories, and returns stored memories for a session.
-- How it works: asks the AI layer to convert a user message into a durable memory when appropriate, writes saved memories to MongoDB, and formats stored memories into a prompt-friendly list.
-- Why it exists: memory behavior is a distinct concern and should not be embedded directly inside the controller.
-
-### `Backend/services/toolService.js`
-
-- What it does: runs a named tool selected by the system.
-- How it works: looks up the tool in the registry and executes it with the provided input.
-- Why it exists: tool execution needs one simple layer between controller logic and individual tool implementations.
-
-### `Backend/tools/toolRegistry.js`
-
-- What it does: lists the tools that are actually available to the app.
-- How it works: exports a single array of tool names, descriptions, and execute handlers.
-- Why it exists: a central registry makes tool discovery and tool-choice prompting consistent.
-
-### `Backend/tools/calculatorTool.js`
-
-- What it does: evaluates simple math expressions.
-- How it works: strips unsupported characters, evaluates the remaining expression, and returns the result as text.
-- Why it exists: some user requests are better answered through deterministic calculation than free-form reasoning.
-
-### `Backend/tools/weatherTool.js`
-
-- What it does: looks up the current weather for a city.
-- How it works: uses a geocoding request to find the place and a weather request to fetch current temperature and wind speed.
-- Why it exists: weather is a concrete example of tool-augmented answers.
-
-### `Backend/tools/webSearchTool.js`
-
-- What it does: contains a placeholder web-search function.
-- How it works: returns a stub message instead of calling a real search provider.
-- Why it exists: it looks like a future extension point, but it is not active in the current registry.
-
-## Frontend
-
-### `Frontend/claws/package.json`
-
-- What it does: defines the frontend runtime, build, and lint dependencies.
-- How it works: uses Next.js as the app framework, React for UI, and Tailwind for styling.
-- Why it exists: it is the package definition for the frontend app.
-
-### `Frontend/claws/next.config.mjs`
-
-- What it does: contains Next.js configuration.
-- How it works: enables the React compiler option in the current frontend setup.
-- Why it exists: framework-level behavior belongs in a dedicated Next config file.
-
-### `Frontend/claws/src/app/layout.jsx`
-
-- What it does: defines the root app layout.
-- How it works: loads global styles, sets metadata, applies fonts, and renders the shared navbar above all routed pages.
-- Why it exists: Next.js app routing uses a root layout to wrap the entire application.
-
-### `Frontend/claws/src/app/globals.css`
-
-- What it does: defines global styling tokens and base styles.
-- How it works: imports Tailwind, sets color variables, and applies default body styling.
-- Why it exists: shared visual behavior should live in one global stylesheet.
-
-### `Frontend/claws/src/app/page.jsx`
-
-- What it does: renders the landing page.
-- How it works: shows a welcome screen and sends the user to `/public` on button click or Enter key press.
-- Why it exists: it provides a simple first-touch entry experience instead of dropping users straight into the chat view.
-
-### `Frontend/claws/src/app/public/layout.jsx`
-
-- What it does: wraps public-route content.
-- How it works: returns a flex container around child content.
-- Why it exists: it provides a route-level layout boundary for the public section.
-
-### `Frontend/claws/src/app/public/page.jsx`
-
-- What it does: renders the main public chat screen.
-- How it works: keeps local message state, creates session IDs, sends chat requests to the backend, renders responses, and supports starting a fresh chat.
-- Why it exists: this is the main user-facing surface of the current app.
-
-### `Frontend/claws/src/app/private/`
-
-- What it does: currently nothing; the folder is empty.
-- Why it exists: it appears to be reserved for future authenticated or restricted pages.
-
-### `Frontend/claws/src/components/navbar.jsx`
-
-- What it does: renders the shared top navigation bar.
-- How it works: shows branding, toggles a light/dark theme class, opens a menu, and exposes profile and logout UI actions.
-- Why it exists: shared navigation belongs in a reusable component rather than each page.
-
-## API Surface Right Now
-
-### `GET /api/hello`
-
-- Purpose: simple backend test endpoint.
-- Response: a JSON hello message.
-
-### `POST /web/chatbot/chat-away`
-
-- Purpose: main chat endpoint.
-- Input: a message string and an optional session ID.
-- Output: JSON containing a success flag and the assistant reply.
-
-### `GET /web/chatbot/sessions`
-
-- Purpose: returns saved chat sessions.
-- Output: JSON containing a success flag and an array of sessions.
-
-## Data Stored By The Backend
-
-The backend stores three kinds of records:
-
-- Chat sessions: one record per conversation thread.
-- Chat messages: one record per user or assistant message.
-- Memories: durable session-specific facts extracted from user messages.
-
-This means the project is not just a stateless chatbot UI. It is already structured around persistent conversation state.
-
-## How The Pieces Work Together
-
-- The frontend owns the visible user experience.
-- The backend owns persistence, orchestration, memory, tool use, and reply generation.
-- MongoDB stores the conversation state.
-- The assistant layer consumes recent messages, saved memories, and optional tool output.
-- The tool layer improves factual or deterministic answers for supported request types.
-
-## Review Notes
-
-During review, the following implementation details stood out:
-
-- `Backend/models/chatbotModel.js` and `Backend/models/chatbotMessageModel.js` define the same message model, so one of them is likely redundant.
-- `Backend/tools/webSearchTool.js` is present but not active because it is not listed in the tool registry.
-- The frontend menu includes profile and logout actions, but those flows are not connected to a real account system.
-- The backend supports listing sessions, but the frontend chat page does not currently render a saved-session browser.
-- The `Frontend/claws/src/app/private/` area is scaffolding for future work rather than a live feature.
-
-## Running The Project Locally
+## File Map (Core)
 
 ### Backend
 
-1. Install backend dependencies in `Backend/`.
-2. Provide local runtime configuration for the database and assistant integration.
-3. Start the backend server.
+- `Backend/server.js`: app startup, middleware, route mount, DB connect.
+- `Backend/routes/chatbotRouter.js`: chatbot route definitions.
+- `Backend/controllers/chatbotController.js`: request orchestration.
+- `Backend/services/openaiService.js`: tool chooser + final assistant generation.
+- `Backend/services/agentService.js`: plan/tool/reply agent pipeline.
+- `Backend/services/plannerService.js`: plan generation.
+- `Backend/services/memoryService.js`: memory extraction/save/load.
+- `Backend/services/toolService.js`: executes selected registry tool.
+- `Backend/tools/toolRegistry.js`: tool registration.
+- `Backend/tools/calculatorTool.js`: math tool.
+- `Backend/tools/weatherTool.js`: weather tool.
+- `Backend/tools/webSearchTool.js`: web lookup tool.
+- `Backend/tools/emailTool.js`: email tool.
+- `Backend/models/chatSessionModel.js`: sessions.
+- `Backend/models/chatbotModel.js`: messages used by controller.
+- `Backend/models/chatbotMessageModel.js`: duplicate message model definition (still present).
+- `Backend/models/memoryModel.js`: categorized memories.
 
 ### Frontend
 
-1. Install frontend dependencies in `Frontend/claws/`.
-2. Start the Next.js development server.
-3. Open the frontend in the browser and use the chat interface.
+- `Frontend/claws/src/app/page.jsx`: welcome screen.
+- `Frontend/claws/src/app/public/page.jsx`: chat UI and message send flow.
+- `Frontend/claws/src/components/navbar.jsx`: shared top navigation.
 
-The frontend expects the backend chat API to be running locally.
+## Environment Requirements (No Secrets)
 
-## Short Summary
+Backend runtime expects environment variables for:
 
-So far, sunny-claws is a working full-stack chatbot application with:
+- Database connection
+- AI API access
+- Gmail sender address + app password (if using email tool)
 
-- A real frontend chat interface.
-- A real backend chat pipeline.
-- Persistent session and memory storage.
-- Basic tool-augmented responses.
-- Clear extension points for future auth, more tools, and richer session browsing.
+Keep these in local env files and never commit secrets.
+
+## Known Gaps / Work In Progress
+
+- `Frontend/claws/src/app/private/` exists but is not implemented.
+- Navbar profile/logout flows are not fully wired.
+- `Backend/models/chatbotModel.js` and `Backend/models/chatbotMessageModel.js` are overlapping definitions.
+- Controller currently includes temporary debugging logs (`TEMP agent steps`).
+
+## Run Locally
+
+### Backend
+
+1. Install dependencies in `Backend/`.
+2. Provide required local env variables.
+3. Start server (for example with nodemon).
+
+### Frontend
+
+1. Install dependencies in `Frontend/claws/`.
+2. Start Next.js dev server.
+3. Open frontend and chat with backend running.
+
+## Summary
+
+sunny-claws now includes planner-assisted orchestration, categorized long-term memory, web lookup, weather fallback intelligence, and email sending in addition to the original chat + persistence flow.
