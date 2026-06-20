@@ -37,7 +37,7 @@ export const chooseToolWithAI = async (userMessage) => {
 
   try {
     const response = await openai.chat.completions.create({
-      model: 'gpt-4o-mini',
+      model: 'gpt-5.5',
       messages: [
         {
           role: 'system',
@@ -52,6 +52,7 @@ ${toolList}
 Important rules:
 - If the user asks about math, use calculator.
 - If the user asks about weather, forecast, temperature, rain, snow, or city weather, use weather.
+- If the user asks for current facts, latest information, definitions, news, or asks you to look something up, use webSearch.
 - Fix small spelling mistakes if the meaning is clear.
 - If the user types "vancovuer", understand it as "Vancouver".
 - Return ONLY JSON.
@@ -62,6 +63,13 @@ If a tool is needed:
   "useTool": true,
   "toolName": "weather",
   "toolInput": "Vancouver"
+}
+
+For lookups and current facts:
+{
+  "useTool": true,
+  "toolName": "webSearch",
+  "toolInput": "latest Node.js LTS version"
 }
 
 If no tool is needed:
@@ -102,7 +110,7 @@ export const askSunnyClaw = async (userMessage, memoryText, toolResult = null) =
   }
 
   const response = await openai.chat.completions.create({
-    model: 'gpt-4o-mini',
+    model: 'gpt-5.5',
     messages: [
       {
         role: 'system',

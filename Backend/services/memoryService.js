@@ -19,59 +19,67 @@ const getOpenAIClient = () => {
   return openaiClient;
 };
 
-export const saveMemory = async (sessionId, memoryText) => {
-  if (!memoryText || memoryText.trim() === '') return;
-
-  await memoryModel.create({
-    sessionId,
-    memory: memoryText.trim(),
-  });
-};
-
-export const getMemories = async (sessionId) => {
-  const memories = await memoryModel
-    .find({ sessionId })
-    .sort({ createdAt: -1 })
-    .limit(10);
-
-  return memories
-    .reverse()
-    .map((item) => `- ${item.memory}`)
-    .join('\n');
-};
-
 export const extractMemory = async (message) => {
   const openai = getOpenAIClient();
 
   if (!openai) {
-    return 'NONE';
+    return {
+      shouldSave: false,
+      category: null,
+      memory: null,
+    };
   }
 
   try {
     const response = await openai.chat.completions.create({
-      model: 'gpt-4o-mini',
+      model: 'gpt-5.5',
       messages: [
         {
           role: 'system',
           content: `
-Extract important long-term facts.
+Extract long-term user facts.
 
-Examples:
+Return ONLY JSON.
 
-"My name is Sunny"
-→ "User's name is Sunny"
+If memory should be saved:
+{
+  "shouldSave": true,
+  "category": "identity",
+  "memory": "User's name is Sunny G."
+}
 
-"I live in Vancouver"
-→ "User lives in Vancouver"
+Allowed categories:
+identity
+preference
+project
+skill
+general
 
-"I like Next.js"
-→ "User likes Next.js"
+Name examples:
+"My name is Sunny G" -> {
+  "shouldSave": true,
+  "category": "identity",
+  "memory": "User's name is Sunny G."
+}
 
-If nothing should be remembered, return:
+"Sunny G is my name" -> {
+  "shouldSave": true,
+  "category": "identity",
+  "memory": "User's name is Sunny G."
+}
 
-NONE
+"I am Sunny G" -> {
+  "shouldSave": true,
+  "category": "identity",
+  "memory": "User's name is Sunny G."
+}
 
-Return only the memory text.
+If nothing useful should be saved:
+{
+  "shouldSave": false,
+  "category": null,
+  "memory": null
+}
         `,
         },
         {
@@ -81,9 +89,53 @@ Return only the memory text.
       ],
     });
 
-    const memoryText = response.choices?.[0]?.message?.content?.trim();
-    return memoryText || 'NONE';
+    const rawContent = response.choices?.[0]?.message?.content || '{}';
+    return JSON.parse(rawContent);
   } catch {
-    return 'NONE';
+    return {
+      shouldSave: false,
+      category: null,
+      memory: null,
+    };
   }
+};
+
+export const saveMemory = async (sessionId, memoryObject) => {
+  if (!memoryObject?.shouldSave) return;
+
+  const cleanMemory = memoryObject.memory.trim();
+  const category = memoryObject.category || 'general';
+
+  try {
+    if (category === 'identity') {
+      await memoryModel.deleteMany({
+        sessionId,
+        category: 'identity',
+      });
+    }
+
+    const existingMemory = await memoryModel.findOne({
+      sessionId,
+      memory: cleanMemory,
+    });
+
+    if (existingMemory) return;
+
+    await memoryModel.create({
+      sessionId,
+      category,
+      memory: cleanMemory,
+    });
+  } catch (error) {
+    console.error('saveMemory error:', error);
+  }
+};
+
+export const getMemories = async (sessionId) => {
+  const memories = await memoryModel
+    .find({ sessionId })
+    .sort({ createdAt: -1 })
+    .limit(10);
+
+  return memories.map((item) => `- ${item.memory}`).join('\n');
 };

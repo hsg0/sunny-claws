@@ -1,8 +1,7 @@
 import chatbotMessageModel from '../models/chatbotModel.js';
 import chatSessionModel from '../models/chatSessionModel.js';
-import { askSunnyClaw, chooseToolWithAI } from '../services/openaiService.js';
-import { saveMemory, getMemories, extractMemory } from '../services/memoryService.js';
-import { runSelectedTool } from '../services/toolService.js';
+import { runSunnyClawAgent } from '../services/agentService.js';
+import { extractMemory, saveMemory, getMemories } from '../services/memoryService.js';
 
 export const getchatsessions = async (req, res) => {
   try {
@@ -38,11 +37,6 @@ export const getchatbotresponse = async (req, res) => {
 
     const cleanMessage = message.trim();
 
-    const extractedMemory = await extractMemory(cleanMessage);
-    if (extractedMemory !== 'NONE') {
-      await saveMemory(sessionId, extractedMemory);
-    }
-
     await chatSessionModel.findOneAndUpdate(
       { sessionId },
       { $setOnInsert: { title: cleanMessage.slice(0, 40) || 'New Chat' } },
@@ -65,25 +59,22 @@ export const getchatbotresponse = async (req, res) => {
       .map((chat) => `${chat.sender}: ${chat.message}`)
       .join('\n');
 
-    const longTermMemoryText = await getMemories(sessionId);
+    const savedMemories = await getMemories(sessionId);
 
     const fullMemoryText = `
-  Recent chat:
-  ${memoryText}
+Recent chat:
+${memoryText}
 
-  Long-term memory:
-  ${longTermMemoryText || 'No long-term memories yet.'}
-  `;
+Saved memories:
+${savedMemories || 'No saved memories yet.'}
+`;
 
-    const toolChoice = await chooseToolWithAI(cleanMessage);
+    const agentResult = await runSunnyClawAgent(cleanMessage, fullMemoryText);
+    console.log('TEMP agent steps:', agentResult.agentSteps);
 
-    let toolResult = null;
-
-    if (toolChoice.useTool) {
-      toolResult = await runSelectedTool(toolChoice.toolName, toolChoice.toolInput);
-    }
-
-    const reply = await askSunnyClaw(cleanMessage, fullMemoryText, toolResult);
+    const reply = agentResult.reply;
+    const extractedMemory = await extractMemory(cleanMessage);
+    await saveMemory(sessionId, extractedMemory);
 
     await chatbotMessageModel.create({
       sessionId,

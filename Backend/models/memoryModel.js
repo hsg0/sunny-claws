@@ -13,6 +13,11 @@ const memorySchema = new mongoose.Schema(
       required: true,
       trim: true,
     },
+
+    category: {
+      type: String,
+      default: 'general',
+    },
   },
   {
     timestamps: true,

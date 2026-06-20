@@ -1,5 +1,7 @@
 {
     "cSpell.words": [
         "getchatbotresponse"
-    ]
+    ],
+    "typescript.tsserver.experimental.enableProjectDiagnostics": false,
+    "typescript.validate.enable": false
 }

@@ -1,16 +1,71 @@
-const fetchJsonWithTimeout = async (url, timeoutMs = 8000) => {
-  const response = await Promise.race([
-    fetch(url),
-    new Promise((_, reject) => {
-      setTimeout(() => reject(new Error('Request timed out')), timeoutMs);
-    }),
-  ]);
+const knownCities = {
+  vancouver: {
+    name: 'Vancouver',
+    latitude: 49.2827,
+    longitude: -123.1207,
+  },
 
-  if (!response.ok) {
-    throw new Error(`Weather API request failed with status ${response.status}`);
+  surrey: {
+    name: 'Surrey',
+    latitude: 49.1913,
+    longitude: -122.8490,
+  },
+
+  'san jose': {
+    name: 'San Jose, California',
+    latitude: 37.3382,
+    longitude: -121.8863,
+  },
+
+  jalandhar: {
+    name: 'Jalandhar',
+    latitude: 31.3260,
+    longitude: 75.5762,
+  },
+};
+
+const fetchJsonWithTimeout = async (url, timeoutMs = 5000) => {
+  const controller = new AbortController();
+
+  const timeout = setTimeout(() => {
+    controller.abort();
+  }, timeoutMs);
+
+  try {
+    const response = await fetch(url, {
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      throw new Error(`Request failed with status ${response.status}`);
+    }
+
+    return await response.json();
+  } finally {
+    clearTimeout(timeout);
+  }
+};
+
+const findKnownCity = (city) => {
+  const lowerCity = city.toLowerCase();
+
+  if (lowerCity.includes('vancouver') || lowerCity.includes('vancovuer')) {
+    return knownCities.vancouver;
   }
 
-  return response.json();
+  if (lowerCity.includes('surrey')) {
+    return knownCities.surrey;
+  }
+
+  if (lowerCity.includes('san jose')) {
+    return knownCities['san jose'];
+  }
+
+  if (lowerCity.includes('jalandhar')) {
+    return knownCities.jalandhar;
+  }
+
+  return null;
 };
 
 export const weatherTool = async (city) => {
@@ -21,18 +76,18 @@ export const weatherTool = async (city) => {
       return 'Please provide a city name for weather lookup.';
     }
 
-    const cleanCity = safeCity.toLowerCase().includes('vancouver')
-      ? 'Vancouver'
-      : safeCity;
-
-    const geoUrl = `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(cleanCity)}&count=1`;
-
-    const geoData = await fetchJsonWithTimeout(geoUrl);
-
-    const place = geoData.results?.[0];
+    let place = findKnownCity(safeCity);
 
     if (!place) {
-      return `I could not find weather for ${safeCity}.`;
+      const geoUrl = `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(safeCity)}&count=1`;
+
+      const geoData = await fetchJsonWithTimeout(geoUrl);
+
+      place = geoData.results?.[0];
+
+      if (!place) {
+        return `I could not find weather for ${safeCity}.`;
+      }
     }
 
     const weatherUrl =
